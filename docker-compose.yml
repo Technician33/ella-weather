@@ -1,0 +1,81 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ella_weather
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # One-shot: runs migrations + seeds the fixed set of locations, then
+  # exits. `backend` won't start until this exits 0 (see
+  # `depends_on.migrate.condition` below) - if it fails, that failure is
+  # loud and separate from the backend's own startup, not hidden behind a
+  # backend that starts anyway and then 500s on first request.
+  #
+  # The trailing `(python -m app.ingest_once || true)` gives a fresh clone
+  # real forecast data immediately instead of an empty dashboard. It's
+  # deliberately isolated with `|| true`: unlike the migration and the
+  # location seed (which are pure/local and can't fail for reasons outside
+  # our control), this depends on Open-Meteo being reachable - a transient
+  # outage here must not fail this step's exit code and take down the
+  # whole stack, since `backend` gates on it.
+  migrate:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ella_weather
+    command:
+      [
+        "sh",
+        "-c",
+        "alembic upgrade head && python -m app.seed && (python -m app.ingest_once || true)",
+      ]
+
+  backend:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ella_weather
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/locations')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # Server-only - the frontend container reaches the backend container
+      # by its Compose service name on the internal network. The browser
+      # never sees this; it only ever talks to the frontend's own origin
+      # via /api/* (see frontend/next.config.ts).
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+
+volumes:
+  db-data:

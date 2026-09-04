@@ -1,20 +1,14 @@
 import type { NextConfig } from "next";
 
-// Server-only env var - never exposed to the browser. Locally this defaults
-// to the FastAPI dev server; in Docker Compose it's set to the backend
-// service's name on the compose network (e.g. http://backend:8000). The
-// browser only ever talks to this Next.js origin via /api/*.
-const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
-
+// /api/* forwarding to the backend lives in proxy.ts, not here. rewrites()
+// is resolved once at `next build` time into a static routes-manifest.json
+// - it can't read BACKEND_URL at container-runtime, only at build-time,
+// which breaks the "one image, per-environment BACKEND_URL" design this
+// project relies on. proxy.ts runs as real code per-request instead.
 const nextConfig: NextConfig = {
-  async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/:path*`,
-      },
-    ];
-  },
+  // Produces .next/standalone - a minimal, self-contained server bundle
+  // for the Docker image, with only the required node_modules copied in.
+  output: "standalone",
 };
 
 export default nextConfig;

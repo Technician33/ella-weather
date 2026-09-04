@@ -10,38 +10,83 @@ from.
 
 ## How to run it
 
-**Target state (once Docker Compose is added):**
-
 ```bash
 docker compose up
 ```
 
-No manual steps from a fresh clone — Compose brings up Postgres, runs
-migrations, seeds the fixed set of cities, and starts both the API and the
-dashboard.
+That's it — no manual steps from a fresh clone. Compose brings up Postgres,
+runs the Alembic migration, seeds the fixed set of cities, and runs one
+initial ingestion cycle so there's real forecast data to look at right away
+— all via a one-shot `migrate` service — then starts the API
+(`http://localhost:8000`) and the dashboard (`http://localhost:3000`).
+`backend` won't start until `db` is healthy (`pg_isready`) *and* `migrate`
+has exited 0; `frontend` won't start until `backend` itself reports
+healthy. See the "Docker Compose" section below for why it's structured
+this way.
 
-**Current state**: Compose isn't built yet. Until then, run it manually:
+Ingestion polling isn't wired to a scheduler yet (see "What was cut"
+below), so that initial run is the only forecast data you'll have until you
+trigger another one manually:
 
 ```bash
-# 1. Postgres
-docker run -d --name ella-weather-dev-pg \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ella_weather \
-  -p 5432:5432 postgres:16-alpine
-
-# 2. Backend
-cd backend
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/ella_weather"
-.venv/bin/alembic upgrade head
-# seed locations + run one ingestion cycle - see backend/app/models.py's
-# Location and backend/app/ingestion.py's run_ingestion_cycle
-.venv/bin/uvicorn app.main:app --reload --port 8000
-
-# 3. Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev   # http://localhost:3000
+docker compose exec backend python -m app.ingest_once
 ```
+
+### Docker Compose: how "no manual steps" actually holds
+
+Two failure modes had to be handled explicitly, not left to chance:
+
+- **`backend` starting before Postgres accepts connections** — handled at
+  the Compose level, not in application code. `db` has a `healthcheck`
+  running `pg_isready`; every service that needs the database declares
+  `depends_on: db: condition: service_healthy`. Compose refuses to start
+  those containers' processes at all until the healthcheck passes, so
+  there's no connection race for the app to handle.
+- **Migrations and seeding running automatically, exactly once, and failing
+  loudly if they fail** — handled by a dedicated one-shot `migrate` service
+  (the backend image, with `command: alembic upgrade head && python -m
+  app.seed`) rather than folding it into the backend's own startup.
+  `backend` declares `depends_on: migrate: condition:
+  service_completed_successfully`, so it won't start until `migrate` has
+  exited 0. If migration fails, you see a container named `migrate` exit
+  non-zero and `backend` simply never starts — rather than starting anyway
+  and failing confusingly on the first request with "relation does not
+  exist." Both `alembic upgrade head` and `app/seed.py` are idempotent, so
+  `migrate` re-running on every `docker compose up` (including against a
+  volume from a previous run) is safe. `migrate` showing as `Exited (0)` in
+  `docker compose ps` afterward is the expected, correct state for a
+  one-shot service, not a failure.
+- **A fresh clone having only an empty schema, no actual forecast data, was
+  itself a gap** — locations being seeded doesn't mean there's anything to
+  look at. `migrate`'s command chain ends with `python -m app.ingest_once`
+  to run one real ingestion cycle on first startup. This step is
+  deliberately isolated with `|| true`: unlike the migration and the
+  location seed, which are pure/local and always succeed deterministically,
+  this one depends on Open-Meteo actually being reachable. If it fails
+  (no network, Open-Meteo down), that failure must not fail `migrate`'s
+  exit code and take the whole stack down with it — the dashboard already
+  treats "no forecast data yet" as a normal, non-error state, so degrading
+  to that is preferable to the entire app refusing to start over a
+  third-party API hiccup. `run_ingestion_cycle`'s existing idempotency
+  guarantee (see below) means this is also safe to run again on every
+  `docker compose up`, not just the first one — it just does nothing if
+  the current 6h slot was already ingested.
+
+### A real bug this surfaced: `next.config.ts` rewrites are build-time, not runtime
+
+The frontend originally forwarded `/api/*` to the backend via `rewrites()`
+in `next.config.ts`, reading `process.env.BACKEND_URL`. That works with
+`next dev`, but broke under Compose: `rewrites()` is invoked once at `next
+build` time and its result is frozen into a static `routes-manifest.json` -
+the Dockerfile's build stage has no `BACKEND_URL` set (Compose's
+`environment:` only applies to the *running* container, not the build), so
+it silently baked in the `http://localhost:8000` fallback. The frontend
+container then tried to reach itself instead of the `backend` service and
+failed with `ECONNREFUSED`. The fix was moving the forwarding into
+`proxy.ts` (Next 16's renamed Middleware) instead, which runs as real code
+per-request against the actually-running server, so `BACKEND_URL` is read
+at genuine container runtime. Caught by actually running `docker compose
+up` and testing `/api/locations`, not by inspecting the config.
 
 ## Architecture / data model
 
