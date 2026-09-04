@@ -1,9 +1,21 @@
-#doel
+###Tools
+Python
+Fast API
+SQLAlchemy
+PostgresSQL
 
+Next.js
+Typescript
+
+Docker (+compose)
+
+Open-meteo API
+
+###doel
 Deze software neemt Belgische weersvoorspellingen op uit Meteo-open API en plaatst ze in een database van PostgresSQL. 
 Deze database moet vervolgens kunnen communiceren met een fastapi backend, om de data in een next.js frontend te kunnen displayen.
 
-#Architectuur
+###Architectuur
 
 ```mermaid
 flowchart LR
@@ -41,3 +53,17 @@ flowchart LR
     LOC --> E1
 ```
 
+###Software runnen
+
+```bash
+docker compose up
+```
+
+Dit start de API en het dashboard op localhost:8000 en localhost:3000, respectievleijk.
+
+###API design
+| Endpoint | Antwoord |
+|---|---|
+| `GET /locations` | Beschikbare steden |
+| `GET /locations/{slug}/forecast/current` | Hoe ziet de weersvoorspelling eruit |
+| `GET /locations/{slug}/forecast/history?target_time=` | Hoe is de weersvoorspelling over tijd geevolueerd |
