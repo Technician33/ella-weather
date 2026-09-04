@@ -50,6 +50,9 @@ flowchart LR
     E1 --> UI
     E2 --> UI
     E3 --> UI
+
+    style ING fill:none,stroke:#c0392b,stroke-width:2px,color:#c0392b
+
 ```
 
 ## Ontwikkelingsfasen
